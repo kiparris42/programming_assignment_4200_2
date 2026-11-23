@@ -36,15 +36,34 @@ def checksum(data):
     """RFC 1071 Internet checksum of `data` (bytes): the one's complement of the
     one's-complement sum of its 16-bit big-endian words, padding an odd byte with 0.
     Chapter 5, Section 5.3.2 works one by hand."""
-    # TODO
-    raise NotImplementedError
+
+    #add padding if odd
+    if len(data) % 2 == 1:
+        data += b"\x00"
+
+    endian = f">{len(data) // 2}H"
+    words = struct.unpack(endian, data)
+    total = sum(words)
+
+    #carry added back in
+    while total >> 16:
+        total = (total & 0xFFFF) + (total >> 16)
+
+    #ones compliment
+    final = ~total & 0xFFFF
+    return final
 
 
 def encode(flags, seq, ack, payload=b""):
     """Return one complete segment: the 16-byte header (CHECKSUM computed over the
     header with CHECKSUM zero, plus the payload) followed by the payload."""
-    # TODO
-    raise NotImplementedError
+
+    #set header with checksum of 0 for calculating checksum
+    preheader = HEADER.pack(VERSION, flags, 0, seq, ack, len(payload), 0)
+
+    CalcChecksum = checksum(preheader + payload)
+
+    return HEADER.pack(VERSION, flags, 0, seq, ack, len(payload), CalcChecksum) + payload
 
 
 class Invalid(Exception):
@@ -59,5 +78,21 @@ def decode(datagram):
     """Return (flags, seq, ack, payload) for a valid segment. Otherwise raise
     Invalid with the reason, applying the checks of Specification Section 6.1
     in that order."""
-    # TODO
-    raise NotImplementedError
+
+    if len(datagram) < HEADER_SIZE:
+        raise Invalid("short")
+
+    #undamaged datagrams should return 0 for checksum
+    if checksum(datagram) != 0:
+        raise Invalid("checksum")
+
+    #unpack the datagram header
+    version, flags, reserved, seq, ack, length, check = HEADER.unpack(datagram[:HEADER_SIZE])
+
+    if (version != VERSION) or (length > MAX_PAYLOAD) or (length != (len(datagram) - HEADER_SIZE)):
+        raise Invalid("header")
+
+    #slice payload to only get bytes after header
+    payload = datagram[HEADER_SIZE:]
+
+    return (flags, seq, ack, payload)
