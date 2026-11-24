@@ -39,6 +39,21 @@ class TransportError(ConnectionError):
     """The peer stopped responding: MAX_RETRIES timeouts in a row, or nothing
     received for IDLE_TIMEOUT."""
 
+# added Connection class to track per-connection sender state,
+# window, outstanding segments, and retransmission timing
+class Connection:
+    def __init__(self, sock, peer, window):
+        self.sock = sock
+        self.peer = peer
+        self.window = window
+        self.base = 1
+        self.snd_next = 1
+        self.outstanding = {}
+        self.timer_deadline = None
+        self.srtt = None
+        self.rttvar = None
+        self.rto = etpt.INIT_RTO
+        self.retry_count = 0
 
 def set_window(w):
     """The sender's window, in segments (1..1024). Called before connect."""
