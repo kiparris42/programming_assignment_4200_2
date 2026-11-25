@@ -54,6 +54,7 @@ class Connection:
         self.rttvar = None
         self.rto = etpt.INIT_RTO
         self.retry_count = 0
+        self.rcv_next = 1
 
 def set_window(w):
     """The sender's window, in segments (1..1024). Called before connect."""
@@ -81,11 +82,73 @@ def connect(host, port):
     # TODO
     raise NotImplementedError
 
-
 def send_all(conn, data):
     """Return once every byte of `data` has been acknowledged."""
-    # TODO
-    raise NotImplementedError
+    chunks = [data[i:i + etpt.MAX_PAYLOAD] for i in range(0, len(data), etpt.MAX_PAYLOAD)]
+    for chunk in chunks:
+        while conn.snd_next >= conn.base + conn.window:
+            pass
+
+        pkt = etpt.encode(etpt.ACK, conn.snd_next, conn.rcv_next, chunk)
+        conn.sock.sendto(pkt, conn.peer)
+
+        conn.outstanding[conn.snd_next] = (chunk, time.monotonic(), False)
+        if conn.timer_deadline is None:
+            conn.timer_deadline = time.monotonic() + conn.rto
+
+        conn.snd_next += 1
+
+    while conn.base < conn.snd_next:
+        # TODO: receive ACKs or handle timeouts until base == snd_next
+        pass
+
+
+# Processes cumulative ACKs, updates sender state, and adjusts RTT/RTO estimates.
+def handle_ack(conn, ack_num):
+    if conn.base < ack_num <= conn.snd_next:
+        sample_candidate = conn.outstanding.get(ack_num - 1)
+        if sample_candidate is not None and sample_candidate[2] is False:
+            rtt_sample = time.monotonic() - sample_candidate[1]
+            if conn.srtt is None:
+                conn.srtt = rtt_sample
+                conn.rttvar = rtt_sample / 2
+            else:
+                conn.rttvar = 0.75 * conn.rttvar + 0.25 * abs(conn.srtt - rtt_sample)
+                conn.srtt = 0.875 * conn.srtt + 0.125 * rtt_sample
+            conn.rto = max(etpt.MIN_RTO, min(etpt.MAX_RTO, conn.srtt + etpt.K * conn.rttvar))
+        for seq in range(conn.base, ack_num):
+            conn.outstanding.pop(seq, None)
+        conn.base = ack_num
+        conn.retry_count = 0
+        if conn.base < conn.snd_next:
+            conn.timer_deadline = time.monotonic() + conn.rto
+        else:
+            conn.timer_deadline = None
+
+# Handles Go-Back-N retransmissions, retry limits, and RTO backoff.
+def handle_timeout(conn):
+    if conn.timer_deadline is None or time.monotonic() < conn.timer_deadline:
+        return
+    if conn.retry_count >= etpt.MAX_RETRIES:
+        raise TransportError("Maximum retransmission retries reached")
+
+    for seq in range(conn.base, conn.snd_next):
+        chunk, timestamp, _ = conn.outstanding[seq]
+        pkt = etpt.encode(etpt.ACK, seq, conn.rcv_next, chunk)
+        conn.sock.sendto(pkt, conn.peer)
+        conn.outstanding[seq] = (chunk, timestamp, True)
+
+    conn.retry_count += 1
+    conn.rto = min(2 * conn.rto, etpt.MAX_RTO)
+    conn.timer_deadline = time.monotonic() + conn.rto
+
+
+
+
+
+
+
+
 
 
 def recv_exact(conn, n):
