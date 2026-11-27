@@ -55,6 +55,9 @@ class Connection:
         self.rto = etpt.INIT_RTO
         self.retry_count = 0
         self.rcv_next = 1
+        self.timeouts = 0
+        self.retransmissions = 0
+        self.segments_sent = 0
 
 def set_window(w):
     """The sender's window, in segments (1..1024). Called before connect."""
@@ -87,10 +90,11 @@ def send_all(conn, data):
     chunks = [data[i:i + etpt.MAX_PAYLOAD] for i in range(0, len(data), etpt.MAX_PAYLOAD)]
     for chunk in chunks:
         while conn.snd_next >= conn.base + conn.window:
-            pass
+            process_one_event(conn)
 
         pkt = etpt.encode(etpt.ACK, conn.snd_next, conn.rcv_next, chunk)
         conn.sock.sendto(pkt, conn.peer)
+        conn.segments_sent += 1
 
         conn.outstanding[conn.snd_next] = (chunk, time.monotonic(), False)
         if conn.timer_deadline is None:
@@ -99,9 +103,7 @@ def send_all(conn, data):
         conn.snd_next += 1
 
     while conn.base < conn.snd_next:
-        # TODO: receive ACKs or handle timeouts until base == snd_next
-        pass
-
+        process_one_event(conn)
 
 # Processes cumulative ACKs, updates sender state, and adjusts RTT/RTO estimates.
 def handle_ack(conn, ack_num):
@@ -129,6 +131,7 @@ def handle_ack(conn, ack_num):
 def handle_timeout(conn):
     if conn.timer_deadline is None or time.monotonic() < conn.timer_deadline:
         return
+    conn.timeouts += 1
     if conn.retry_count >= etpt.MAX_RETRIES:
         raise TransportError("Maximum retransmission retries reached")
 
@@ -136,11 +139,44 @@ def handle_timeout(conn):
         chunk, timestamp, _ = conn.outstanding[seq]
         pkt = etpt.encode(etpt.ACK, seq, conn.rcv_next, chunk)
         conn.sock.sendto(pkt, conn.peer)
+        conn.retransmissions += 1
+        conn.segments_sent += 1
         conn.outstanding[seq] = (chunk, timestamp, True)
 
     conn.retry_count += 1
     conn.rto = min(2 * conn.rto, etpt.MAX_RTO)
     conn.timer_deadline = time.monotonic() + conn.rto
+
+def process_one_event(conn):
+    handle_timeout(conn)
+    if conn.timer_deadline is None:
+        remaining = None
+    else:
+        remaining = max(0.0, conn.timer_deadline - time.monotonic())
+    if remaining == 0.0:
+        return
+    conn.sock.settimeout(remaining)
+    try:
+        data, address = conn.sock.recvfrom(65536)
+    except socket.timeout:
+        return
+    if address != conn.peer:
+        return
+    try:
+        flags, seq, ack, payload = etpt.decode(data)
+    except etpt.Invalid:
+        return
+    if flags & etpt.ACK:
+        handle_ack(conn, ack)
+
+
+
+
+
+
+
+
+
 
 
 
